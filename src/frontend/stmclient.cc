@@ -398,7 +398,7 @@ bool STMClient::process_user_input( int fd )
                    || ( the_byte == 0x0D ) ); /* LineFeed, Ctrl-J, '\n' or CarriageReturn, Ctrl-M, '\r' */
 
     if ( the_byte == 0x0C ) { /* Ctrl-L */
-      repaint_requested = true;
+      repaint_requested = false;
     }
 
     net.get_current_state().push_back( Parser::UserByte( the_byte ) );
