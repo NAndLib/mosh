@@ -39,7 +39,8 @@
 using namespace Terminal;
 
 Cell::Cell( color_type background_color )
-  : contents(), renditions( background_color ), wide( false ), fallback( false ), wrap( false )
+  : contents(), renditions( background_color ), wide( false ), fallback( false ), wrap( false ),
+    wide_padding( false )
 {}
 
 void Cell::reset( color_type background_color )
@@ -49,6 +50,7 @@ void Cell::reset( color_type background_color )
   wide = false;
   fallback = false;
   wrap = false;
+  wide_padding = false;
 }
 
 void DrawState::reinitialize_tabs( unsigned int start )
@@ -60,12 +62,12 @@ void DrawState::reinitialize_tabs( unsigned int start )
 }
 
 DrawState::DrawState( int s_width, int s_height )
-  : width( s_width ), height( s_height ), cursor_col( 0 ), cursor_row( 0 ), combining_char_col( 0 ),
-    combining_char_row( 0 ), default_tabs( true ), tabs( s_width ), scrolling_region_top_row( 0 ),
-    scrolling_region_bottom_row( height - 1 ), renditions( 0 ), save(), next_print_will_wrap( false ),
-    origin_mode( false ), auto_wrap_mode( true ), insert_mode( false ), cursor_visible( true ),
-    reverse_video( false ), bracketed_paste( false ), mouse_reporting_mode( MOUSE_REPORTING_NONE ),
-    mouse_focus_event( false ), mouse_alternate_scroll( false ), mouse_encoding_mode( MOUSE_ENCODING_DEFAULT ),
+  : width( s_width ), height( s_height ), cursor_col( 0 ), cursor_row( 0 ), default_tabs( true ), tabs( s_width ),
+    scrolling_region_top_row( 0 ), scrolling_region_bottom_row( height - 1 ), renditions( 0 ), save(),
+    cursor_style( Terminal::CursorStyle::BLINKING_BLOCK ), next_print_will_wrap( false ), origin_mode( false ),
+    auto_wrap_mode( true ), insert_mode( false ), cursor_visible( true ), reverse_video( false ),
+    bracketed_paste( false ), mouse_reporting_mode( MOUSE_REPORTING_NONE ), mouse_focus_event( false ),
+    mouse_alternate_scroll( false ), mouse_encoding_mode( MOUSE_ENCODING_DEFAULT ),
     application_mode_cursor_keys( false )
 {
   reinitialize_tabs( 0 );
@@ -73,7 +75,7 @@ DrawState::DrawState( int s_width, int s_height )
 
 Framebuffer::Framebuffer( int s_width, int s_height )
   : rows(), icon_name(), window_title(), clipboard(), bell_count( 0 ), title_initialized( false ),
-    ds( s_width, s_height )
+    clipboard_seqnum( 0 ), ds( s_width, s_height )
 {
   assert( s_height > 0 );
   assert( s_width > 0 );
@@ -85,7 +87,7 @@ Framebuffer::Framebuffer( int s_width, int s_height )
 Framebuffer::Framebuffer( const Framebuffer& other )
   : rows( other.rows ), icon_name( other.icon_name ), window_title( other.window_title ),
     clipboard( other.clipboard ), bell_count( other.bell_count ), title_initialized( other.title_initialized ),
-    ds( other.ds )
+    clipboard_seqnum( other.clipboard_seqnum ), ds( other.ds )
 {}
 
 Framebuffer& Framebuffer::operator=( const Framebuffer& other )
@@ -97,6 +99,7 @@ Framebuffer& Framebuffer::operator=( const Framebuffer& other )
     clipboard = other.clipboard;
     bell_count = other.bell_count;
     title_initialized = other.title_initialized;
+    clipboard_seqnum = other.clipboard_seqnum;
     ds = other.ds;
   }
   return *this;
@@ -113,8 +116,6 @@ void Framebuffer::scroll( int N )
 
 void DrawState::new_grapheme( void )
 {
-  combining_char_col = cursor_col;
-  combining_char_row = cursor_row;
 }
 
 void DrawState::snap_cursor_to_border( void )
@@ -189,13 +190,23 @@ void Framebuffer::move_rows_autoscroll( int rows )
 
 Cell* Framebuffer::get_combining_cell( void )
 {
-  if ( ( ds.get_combining_char_col() < 0 ) || ( ds.get_combining_char_row() < 0 )
-       || ( ds.get_combining_char_col() >= ds.get_width() )
-       || ( ds.get_combining_char_row() >= ds.get_height() ) ) {
+  int cursor_x = ds.get_cursor_col();
+  if ( cursor_x < 1 ) {
     return NULL;
-  } /* can happen if a resize came in between */
+  }
 
-  return get_mutable_cell( ds.get_combining_char_row(), ds.get_combining_char_col() );
+  int n = 1;
+  Cell* last = get_mutable_cell( -1, cursor_x - n );
+  if ( cursor_x != 1 && ( last->get_wide_padding() ) ) {
+    n = 2;
+    last = get_mutable_cell( -1, cursor_x - n );
+  }
+
+  if ( last && ( last->get_width() != n || last->get_wide_padding() ) ) {
+    return NULL;
+  }
+
+  return last;
 }
 
 void DrawState::set_tab( void )
@@ -379,6 +390,7 @@ void Framebuffer::reset( void )
   rows = rows_type( height, newrow() );
   window_title.clear();
   clipboard.clear();
+  clipboard_seqnum = 0;
   /* do not reset bell_count */
 }
 
@@ -387,6 +399,7 @@ void Framebuffer::soft_reset( void )
   ds.insert_mode = false;
   ds.origin_mode = false;
   ds.cursor_visible = true; /* per xterm and gnome-terminal */
+  ds.cursor_style = Terminal::CursorStyle::BLINKING_BLOCK;
   ds.application_mode_cursor_keys = false;
   ds.set_scrolling_region( 0, ds.get_height() - 1 );
   ds.add_rendition( 0 );
@@ -437,15 +450,10 @@ void DrawState::resize( int s_width, int s_height )
   snap_cursor_to_border();
 
   /* saved cursor will be snapped to border on restore */
-
-  /* invalidate combining char cell if necessary */
-  if ( ( combining_char_col >= width ) || ( combining_char_row >= height ) ) {
-    combining_char_col = combining_char_row = -1;
-  }
 }
 
 Renditions::Renditions( color_type s_background )
-  : foreground_color( 0 ), background_color( s_background ), attributes( 0 )
+  : foreground_color( 0 ), background_color( s_background ), underline_color( 0 ), attributes( 0 )
 {}
 
 /* This routine cannot be used to set a color beyond the 16-color set. */
@@ -453,7 +461,7 @@ void Renditions::set_rendition( color_type num )
 {
   if ( num == 0 ) {
     clear_attributes();
-    foreground_color = background_color = 0;
+    foreground_color = background_color = underline_color = 0;
     return;
   }
 
@@ -462,6 +470,9 @@ void Renditions::set_rendition( color_type num )
     return;
   } else if ( num == 49 ) {
     background_color = 0;
+    return;
+  } else if ( num == 59 ) {
+    underline_color = 0;
     return;
   }
 
@@ -479,19 +490,33 @@ void Renditions::set_rendition( color_type num )
     return;
   }
 
-  bool value = num < 9;
+  bool value = num < 10;
   switch ( num ) {
     case 1:
+      set_attribute( bold, value );
+      break;
+    case 2:
+      set_attribute( faint, value );
+      break;
     case 22:
       set_attribute( bold, value );
+      set_attribute( faint, value );
       break;
     case 3:
     case 23:
       set_attribute( italic, value );
       break;
     case 4:
+    case 401:
+      set_attribute( underlined, true );
+      break;
     case 24:
-      set_attribute( underlined, value );
+    case 400:
+      set_attribute( underlined, false );
+      set_attribute( underline_double, false );
+      set_attribute( underline_curl, false );
+      set_attribute( underline_dotted, false );
+      set_attribute( underline_dashed, false );
       break;
     case 5:
     case 25:
@@ -504,6 +529,23 @@ void Renditions::set_rendition( color_type num )
     case 8:
     case 28:
       set_attribute( invisible, value );
+      break;
+    case 9:
+    case 29:
+      set_attribute( strikethrough, value );
+      break;
+
+    case 402:
+      set_attribute( underline_double, true );
+      break;
+    case 403:
+      set_attribute( underline_curl, true );
+      break;
+    case 404:
+      set_attribute( underline_dotted, true );
+      break;
+    case 405:
+      set_attribute( underline_dashed, true );
       break;
     default:
       break; /* ignore unknown rendition */
@@ -528,6 +570,11 @@ void Renditions::set_background_color( int num )
   }
 }
 
+void Renditions::set_underline_color( int num )
+{
+  underline_color = num;
+}
+
 std::string Renditions::sgr( void ) const
 {
   std::string ret;
@@ -536,6 +583,8 @@ std::string Renditions::sgr( void ) const
   ret.append( "\033[0" );
   if ( get_attribute( bold ) )
     ret.append( ";1" );
+  if ( get_attribute( faint ) )
+    ret.append( ";2" );
   if ( get_attribute( italic ) )
     ret.append( ";3" );
   if ( get_attribute( underlined ) )
@@ -546,6 +595,16 @@ std::string Renditions::sgr( void ) const
     ret.append( ";7" );
   if ( get_attribute( invisible ) )
     ret.append( ";8" );
+  if ( get_attribute( strikethrough ) )
+    ret.append( ";9" );
+  if ( get_attribute( underline_double ) )
+    ret.append( ";4:2" );
+  if ( get_attribute( underline_curl ) )
+    ret.append( ";4:3" );
+  if ( get_attribute( underline_dotted ) )
+    ret.append( ";4:4" );
+  if ( get_attribute( underline_dashed ) )
+    ret.append( ";4:5" );
 
   if ( foreground_color ) {
     // Since foreground_color is a 25-bit field, it is promoted to an int when
@@ -586,6 +645,20 @@ std::string Renditions::sgr( void ) const
       // See comment above about explicit promotion; it applies here as well.
       int bg = background_color;
       snprintf( col, sizeof( col ), ";%d", bg );
+    }
+    ret.append( col );
+  }
+  if ( underline_color ) {
+    ret.append( "m\033[" );
+    if ( is_true_color( underline_color ) ) {
+      snprintf( col,
+                sizeof( col ),
+                "58:2::%d:%d:%d",
+                ( underline_color >> 16 ) & 0xff,
+                ( underline_color >> 8 ) & 0xff,
+                underline_color & 0xff );
+    } else {
+      snprintf( col, sizeof( col ), "58:5:%d", underline_color );
     }
     ret.append( col );
   }
@@ -679,6 +752,11 @@ bool Cell::compare( const Cell& other ) const
     ret = true;
     // See comment above about bit-field promotion; it applies here as well.
     fprintf( stderr, "wrap: %d vs. %d\n", wrap, other.wrap );
+  }
+
+  if ( wide_padding != other.wide_padding ) {
+    ret = true;
+    fprintf( stderr, "wide_padding: %d vs. %d\n", wide_padding, other.wide_padding );
   }
 
   return ret;

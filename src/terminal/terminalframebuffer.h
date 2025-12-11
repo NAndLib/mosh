@@ -47,6 +47,17 @@
 namespace Terminal {
 using color_type = uint32_t;
 
+enum CursorStyle
+{
+  BLINKING_BLOCK = 0,
+  BLINKING_BLOCK_DEFAULT = 1,
+  STEADY_BLOCK = 2,
+  BLINKING_UNDERLINE = 3,
+  STEADY_UNDERLINE = 4,
+  BLINKING_BAR = 5,
+  STEADY_BAR = 6,
+};
+
 class Renditions
 {
 public:
@@ -59,19 +70,25 @@ public:
     blink,
     inverse,
     invisible,
-    SIZE
+    strikethrough,
+    underline_double,
+    underline_curl,
+    underline_dotted,
+    underline_dashed,
   } attribute_type;
 
 private:
   static const uint64_t true_color_mask = 0x1000000;
-  uint64_t foreground_color : 25;
-  uint64_t background_color : 25;
-  uint64_t attributes : 8;
+  uint32_t foreground_color;
+  uint32_t background_color;
+  uint32_t underline_color;
+  uint16_t attributes;
 
 public:
   Renditions( color_type s_background );
   void set_foreground_color( int num );
   void set_background_color( int num );
+  void set_underline_color( int num );
   void set_rendition( color_type num );
   std::string sgr( void ) const;
 
@@ -88,7 +105,7 @@ public:
   bool operator==( const Renditions& x ) const
   {
     return ( attributes == x.attributes ) && ( foreground_color == x.foreground_color )
-           && ( background_color == x.background_color );
+           && ( background_color == x.background_color ) && ( underline_color == x.underline_color );
   }
   void set_attribute( attribute_type attr, bool val )
   {
@@ -107,6 +124,7 @@ private:
   unsigned int wide : 1;     /* 0 = narrow, 1 = wide */
   unsigned int fallback : 1; /* first character is combining character */
   unsigned int wrap : 1;
+  unsigned int wide_padding : 1;
 
 private:
   Cell();
@@ -119,7 +137,7 @@ public:
   bool operator==( const Cell& x ) const
   {
     return ( ( contents == x.contents ) && ( fallback == x.fallback ) && ( wide == x.wide )
-             && ( renditions == x.renditions ) && ( wrap == x.wrap ) );
+             && ( renditions == x.renditions ) && ( wrap == x.wrap ) && ( wide_padding == x.wide_padding ) );
   }
 
   bool operator!=( const Cell& x ) const { return !operator==( x ); }
@@ -127,10 +145,12 @@ public:
   /* Accessors for contents field */
   std::string debug_contents( void ) const;
 
+  std::string const& get_contents() const { return contents; }
   bool empty( void ) const { return contents.empty(); }
   /* 32 seems like a reasonable limit on combining characters */
   bool full( void ) const { return contents.size() >= 32; }
   void clear( void ) { contents.clear(); }
+  std::size_t size() const { return contents.size(); }
 
   bool is_blank( void ) const
   {
@@ -203,6 +223,8 @@ public:
   void set_renditions( const Renditions& r ) { renditions = r; }
   bool get_wide( void ) const { return wide; }
   void set_wide( bool w ) { wide = w; }
+  bool get_wide_padding( void ) const { return wide_padding; }
+  void set_wide_padding( bool w ) { wide_padding = w; }
   unsigned int get_width( void ) const { return wide + 1; }
   bool get_fallback( void ) const { return fallback; }
   void set_fallback( bool f ) { fallback = f; }
@@ -261,7 +283,6 @@ private:
   void snap_cursor_to_border( void );
 
   int cursor_col, cursor_row;
-  int combining_char_col, combining_char_row;
 
   bool default_tabs;
   std::vector<bool> tabs;
@@ -275,6 +296,8 @@ private:
   SavedCursor save;
 
 public:
+  int cursor_style;
+
   bool next_print_will_wrap;
   bool origin_mode;
   bool auto_wrap_mode;
@@ -313,8 +336,6 @@ public:
 
   int get_cursor_col( void ) const { return cursor_col; }
   int get_cursor_row( void ) const { return cursor_row; }
-  int get_combining_char_col( void ) const { return combining_char_col; }
-  int get_combining_char_row( void ) const { return combining_char_row; }
   int get_width( void ) const { return width; }
   int get_height( void ) const { return height; }
 
@@ -334,6 +355,7 @@ public:
 
   void set_foreground_color( int x ) { renditions.set_foreground_color( x ); }
   void set_background_color( int x ) { renditions.set_background_color( x ); }
+  void set_underline_color( int x ) { renditions.set_underline_color( x ); }
   void add_rendition( color_type x ) { renditions.set_rendition( x ); }
   const Renditions& get_renditions( void ) const { return renditions; }
   Renditions& get_renditions( void ) { return renditions; }
@@ -353,8 +375,9 @@ public:
     return ( width == x.width ) && ( height == x.height ) && ( cursor_col == x.cursor_col )
            && ( cursor_row == x.cursor_row ) && ( cursor_visible == x.cursor_visible )
            && ( reverse_video == x.reverse_video ) && ( renditions == x.renditions )
-           && ( bracketed_paste == x.bracketed_paste ) && ( mouse_reporting_mode == x.mouse_reporting_mode )
-           && ( mouse_focus_event == x.mouse_focus_event ) && ( mouse_alternate_scroll == x.mouse_alternate_scroll )
+           && ( cursor_style == x.cursor_style ) && ( bracketed_paste == x.bracketed_paste )
+           && ( mouse_reporting_mode == x.mouse_reporting_mode ) && ( mouse_focus_event == x.mouse_focus_event )
+           && ( mouse_alternate_scroll == x.mouse_alternate_scroll )
            && ( mouse_encoding_mode == x.mouse_encoding_mode );
   }
 };
@@ -385,6 +408,7 @@ private:
   title_type clipboard;
   unsigned int bell_count;
   bool title_initialized; /* true if the window title has been set via an OSC */
+  uint8_t clipboard_seqnum;
 
   row_pointer newrow( void )
   {
@@ -461,7 +485,13 @@ public:
   bool is_title_initialized( void ) const { return title_initialized; }
   void set_icon_name( const title_type& s ) { icon_name = s; }
   void set_window_title( const title_type& s ) { window_title = s; }
-  void set_clipboard( const title_type& s ) { clipboard = s; }
+  void set_clipboard( const title_type& s )
+  {
+    clipboard = s;
+    // Rolling over 255 -> 0 is okay
+    clipboard_seqnum++;
+  }
+  uint8_t get_clipboard_seqnum( void ) const { return clipboard_seqnum; }
   const title_type& get_icon_name( void ) const { return icon_name; }
   const title_type& get_window_title( void ) const { return window_title; }
   const title_type& get_clipboard( void ) const { return clipboard; }
@@ -479,7 +509,7 @@ public:
   bool operator==( const Framebuffer& x ) const
   {
     return ( rows == x.rows ) && ( window_title == x.window_title ) && ( clipboard == x.clipboard )
-           && ( bell_count == x.bell_count ) && ( ds == x.ds );
+           && ( clipboard_seqnum == x.clipboard_seqnum ) && ( bell_count == x.bell_count ) && ( ds == x.ds );
   }
 };
 }

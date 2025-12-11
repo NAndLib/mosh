@@ -103,8 +103,8 @@ std::string Display::new_frame( bool initialized, const Framebuffer& last, const
   }
 
   /* has clipboard changed? */
-  if ( f.get_clipboard() != frame.last_frame.get_clipboard() ) {
-    frame.append( "\033]52;c;" );
+  if ( f.get_clipboard_seqnum() != frame.last_frame.get_clipboard_seqnum() ) {
+    frame.append( "\033]52;" );
     const title_type& clipboard( f.get_clipboard() );
     for ( title_type::const_iterator i = clipboard.begin(); i != clipboard.end(); i++ ) {
       frame.append( *i );
@@ -140,6 +140,12 @@ std::string Display::new_frame( bool initialized, const Framebuffer& last, const
   if ( !initialized ) {
     frame.cursor_visible = false;
     frame.append( "\033[?25l" );
+  }
+
+  /* is cursor style initialized? */
+  if ( !initialized ) {
+    frame.cursor_style = Terminal::CursorStyle::BLINKING_BLOCK;
+    frame.append( "\033[0 q" );
   }
 
   int frame_y = 0;
@@ -265,6 +271,13 @@ std::string Display::new_frame( bool initialized, const Framebuffer& last, const
     } else {
       frame.append( "\033[?25l" );
     }
+  }
+
+  /* has cursor style changed? */
+  if ( ( !initialized ) || ( f.ds.cursor_style != frame.cursor_style ) ) {
+    char cursor_style_sequence_buf[6];
+    snprintf( cursor_style_sequence_buf, sizeof cursor_style_sequence_buf, "\033[%d q", f.ds.cursor_style );
+    frame.append( cursor_style_sequence_buf );
   }
 
   /* have renditions changed? */
@@ -460,7 +473,7 @@ bool Display::put_row( bool initialized,
 
 FrameState::FrameState( const Framebuffer& s_last )
   : str(), cursor_x( 0 ), cursor_y( 0 ), current_rendition( 0 ), cursor_visible( s_last.ds.cursor_visible ),
-    last_frame( s_last )
+    cursor_style( s_last.ds.cursor_style ), last_frame( s_last )
 {
   /* Preallocate for better performance.  Make a guess-- doesn't matter for correctness */
   str.reserve( last_frame.ds.get_width() * last_frame.ds.get_height() * 4 );
